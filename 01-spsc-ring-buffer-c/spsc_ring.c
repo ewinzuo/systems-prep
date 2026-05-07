@@ -49,16 +49,24 @@
 #include <string.h>
 
 struct spsc_ring {
-  uint64_t head;
-  uint64_t tail;
+  _Atomic uint64_t head;
+  _Atomic uint64_t tail;
   size_t capacity;
   size_t element_size;
   char *buf;
 };
 spsc_ring_t *spsc_ring_create(size_t capacity, size_t elem_size) {
+  if (capacity == 0 || elem_size == 0)
+    return NULL;
+
   spsc_ring_t *ring = malloc(sizeof *ring);
-  char *buf = malloc(capacity * elem_size);
-  ring->buf = buf;
+  if (!ring)
+    return NULL;
+  ring->buf = malloc(capacity * elem_size);
+  if (!ring->buf) {
+    free(ring);
+    return NULL;
+  }
   ring->head = 0;
   ring->tail = 0;
   ring->element_size = elem_size;
@@ -66,7 +74,7 @@ spsc_ring_t *spsc_ring_create(size_t capacity, size_t elem_size) {
   return ring;
 }
 
-static char *spsc__address_of_index(spsc_ring_t *r, uint64_t idx) {
+static char *spsc__address_of_index(const spsc_ring_t *r, uint64_t idx) {
   return r->buf + (idx % r->capacity) * r->element_size;
 }
 
@@ -94,7 +102,15 @@ size_t spsc_ring_push_n(spsc_ring_t *r, const void *e, size_t n) {
     n = remaining;
   }
 
-  memcpy(spsc__address_of_index(r, r->head), e, n * r->element_size);
+  size_t idx = r->head % r->capacity;
+  size_t first = r->capacity - idx; /* slots from idx to end of buf */
+  if (first > n)
+    first = n;
+  memcpy(r->buf + idx * r->element_size, e, first * r->element_size);
+  if (n > first) {
+    memcpy(r->buf, (const char *)e + first * r->element_size,
+           (n - first) * r->element_size);
+  }
   r->head += n;
   return n;
 }
@@ -103,7 +119,15 @@ size_t spsc_ring_pop_n(spsc_ring_t *r, void *e, size_t n) {
   if (spsc_ring_size(r) < n)
     n = spsc_ring_size(r);
 
-  memcpy(e, spsc__address_of_index(r, r->tail), n * r->element_size);
+  size_t idx = r->tail % r->capacity;
+  size_t first = r->capacity - idx;
+  if (first > n)
+    first = n;
+  memcpy(e, r->buf + idx * r->element_size, first * r->element_size);
+  if (n > first) {
+    memcpy((char *)e + first * r->element_size, r->buf,
+           (n - first) * r->element_size);
+  }
   r->tail += n;
   return n;
 }
