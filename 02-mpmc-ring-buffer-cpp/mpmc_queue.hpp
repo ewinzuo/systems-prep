@@ -1,99 +1,75 @@
 #pragma once
-
 #include <atomic>
 #include <cstddef>
-#include <new>
-#include <stdexcept>
-#include <type_traits>
-#include <utility>
+#include <memory>
 
 namespace ip {
 
-inline constexpr std::size_t kCacheLine = 64;
+template <typename T, typename Alloc = std::allocator<T>> class SpscQueue {
+  using allocator_traits = std::allocator_traits<Alloc>;
+  using value_type = T;
+  using size_type = typename allocator_traits::size_type;
 
-// Vyukov-style bounded MPMC queue.
-template <class T>
-class MpmcQueue {
 public:
-    explicit MpmcQueue(std::size_t capacity)
-        : capacity_(capacity), mask_(capacity - 1) {
-        if (capacity == 0 || (capacity & (capacity - 1)) != 0)
-            throw std::invalid_argument("capacity must be a power of two and > 0");
-        cells_ = new Cell[capacity];
-        for (std::size_t i = 0; i < capacity; ++i)
-            cells_[i].seq.store(i, std::memory_order_relaxed);
-        enqueue_pos_.store(0, std::memory_order_relaxed);
-        dequeue_pos_.store(0, std::memory_order_relaxed);
+  explicit SpscQueue(size_type capacity, const Alloc &alloc = Alloc{})
+      : alloc_(alloc), capacity_(capacity),
+        items_(allocator_traits::allocate(alloc_, capacity)), head_(0),
+        tail_(0) {}
+  SpscQueue(const SpscQueue &) = delete;
+  SpscQueue &operator=(const SpscQueue &) = delete;
+  SpscQueue(SpscQueue &&) = delete;
+  SpscQueue &operator=(SpscQueue &&) = delete;
+  ~SpscQueue() {
+    auto tail = tail_.load(std::memory_order_relaxed);
+    auto head = head_.load(std::memory_order_relaxed);
+    while (tail != head) {
+      items_[tail % capacity_].~T();
+      ++tail;
     }
-
-    ~MpmcQueue() { delete[] cells_; }
-
-    MpmcQueue(const MpmcQueue&) = delete;
-    MpmcQueue& operator=(const MpmcQueue&) = delete;
-
-    bool try_push(T v) {
-        Cell* cell;
-        std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
-        for (;;) {
-            cell = &cells_[pos & mask_];
-            std::size_t seq = cell->seq.load(std::memory_order_acquire);
-            std::intptr_t diff = (std::intptr_t)seq - (std::intptr_t)pos;
-            if (diff == 0) {
-                if (enqueue_pos_.compare_exchange_weak(
-                        pos, pos + 1, std::memory_order_relaxed))
-                    break;
-            } else if (diff < 0) {
-                return false;  // full
-            } else {
-                pos = enqueue_pos_.load(std::memory_order_relaxed);
-            }
-        }
-        cell->data = std::move(v);
-        cell->seq.store(pos + 1, std::memory_order_release);
-        return true;
+    allocator_traits::deallocate(alloc_, items_, capacity_);
+  }
+  bool push(T const &value) {
+    auto head = head_.load(std::memory_order_relaxed);
+    auto tail = tail_.load(std::memory_order_acquire);
+    if (full(head, tail)) {
+      return false;
     }
-
-    bool try_pop(T& out) {
-        Cell* cell;
-        std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
-        for (;;) {
-            cell = &cells_[pos & mask_];
-            std::size_t seq = cell->seq.load(std::memory_order_acquire);
-            std::intptr_t diff = (std::intptr_t)seq - (std::intptr_t)(pos + 1);
-            if (diff == 0) {
-                if (dequeue_pos_.compare_exchange_weak(
-                        pos, pos + 1, std::memory_order_relaxed))
-                    break;
-            } else if (diff < 0) {
-                return false;  // empty
-            } else {
-                pos = dequeue_pos_.load(std::memory_order_relaxed);
-            }
-        }
-        out = std::move(cell->data);
-        cell->seq.store(pos + mask_ + 1, std::memory_order_release);
-        return true;
+    new (element(head)) T(value);
+    head_.store(head + 1, std::memory_order_release);
+    return true;
+  }
+  bool pop(T &value) {
+    auto tail = tail_.load(std::memory_order_relaxed);
+    auto head = head_.load(std::memory_order_acquire);
+    if (empty(head, tail)) {
+      return false;
     }
-
-    std::size_t capacity() const noexcept { return capacity_; }
-    std::size_t size_approx() const noexcept {
-        auto h = enqueue_pos_.load(std::memory_order_relaxed);
-        auto t = dequeue_pos_.load(std::memory_order_relaxed);
-        return h - t;
-    }
+    value = *element(tail);
+    element(tail)->~T();
+    tail_.store(tail + 1, std::memory_order_release);
+    return true;
+  }
+  size_type size() const noexcept {
+    auto h = head_.load(std::memory_order_relaxed);
+    auto t = tail_.load(std::memory_order_relaxed);
+    return h - t;
+  }
+  bool empty() const noexcept { return size() == 0; }
+  bool full() const noexcept { return size() == capacity_; }
+  size_type capacity() const noexcept { return capacity_; }
 
 private:
-    struct Cell {
-        std::atomic<std::size_t> seq;
-        T                        data;
-    };
-
-    alignas(kCacheLine) std::atomic<std::size_t> enqueue_pos_;
-    alignas(kCacheLine) std::atomic<std::size_t> dequeue_pos_;
-
-    std::size_t capacity_;
-    std::size_t mask_;
-    Cell*       cells_;
+  bool empty(size_type head, size_type tail) const { return head == tail; }
+  T *element(size_type idx) { return &items_[idx % capacity_]; }
+  bool full(size_type head, size_type tail) const {
+    return head - tail == capacity_;
+  }
+  [[no_unique_address]] Alloc alloc_;
+  size_type capacity_;
+  T *items_;
+  alignas(64) std::atomic<size_type> head_;
+  alignas(64) std::atomic<size_type> tail_;
+  char padding_[64 - sizeof(size_type)];
 };
 
-}  // namespace ip
+} // namespace ip

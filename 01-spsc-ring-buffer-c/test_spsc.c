@@ -11,11 +11,9 @@
  *     strict monotonic sequence
  *
  * Note on the concurrent test:
- *   The implementation currently uses plain uint64_t (not _Atomic) for
- *   head/tail. On x86 (TSO + naturally-aligned 64-bit words) this happens to
- *   produce the right answer, so `make test` passes. Under TSan (`make tsan`)
- *   the same test will flag data races on head/tail — that's the signal that
- *   atomic + acquire/release is the next change. */
+ *   head/tail are _Atomic uint64_t, accessed via atomic_load/store_explicit
+ *   with relaxed self-loads, acquire on the peer's counter, and release on
+ *   the self-store. `make tsan` should be clean. */
 
 #include "spsc_ring.h"
 

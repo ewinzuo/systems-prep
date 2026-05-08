@@ -1,29 +1,22 @@
-// Day 2 unit + concurrent tests for MpmcQueue.
+// Day 2 unit + concurrent tests for MpmcQueue. Stub — implement alongside mpmc_queue.hpp.
 //
-// TODO (Day 2 implementation):
-//   - port test_create_validation / single push-pop / fill / over-capacity from Day 1
-//   - 4P/4C concurrent test that records (producer_id, seq) per item and verifies
-//     each pair shows up exactly once on the consumer side
-//   - run under TSan and ASan
+// Cases to cover:
+//   - construction: 0 capacity throws; non-power-of-two throws;
+//     valid capacity initializes empty (size_approx() == 0).
+//   - try_pop on empty returns false.
+//   - try_push fills to capacity; (capacity+1)th push returns false.
+//   - try_pop drains FIFO; subsequent try_pop returns false.
+//   - 4 producers x 4 consumers concurrent: each producer pushes
+//     1M (producer_id, seq) pairs; consumers collect; verify every pair
+//     appears exactly once across all consumers (FIFO per producer; not
+//     across producers).
+//   - run under TSan (`make tsan`) and ASan (`make asan`).
 
 #include "mpmc_queue.hpp"
 
-#include <atomic>
-#include <cassert>
 #include <iostream>
-#include <thread>
-#include <vector>
 
 int main() {
-    ip::MpmcQueue<int> q(8);
-    int v;
-    assert(!q.try_pop(v));
-    for (int i = 0; i < 8; i++) assert(q.try_push(i));
-    assert(!q.try_push(99));            // full
-    for (int i = 0; i < 8; i++) {
-        assert(q.try_pop(v));
-        assert(v == i);
-    }
-    assert(!q.try_pop(v));
-    std::cout << "smoke OK\n";
+    std::cout << "mpmc tests stub — implement me\n";
+    return 0;
 }
