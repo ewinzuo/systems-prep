@@ -21,7 +21,7 @@ public:
       : alloc_(alloc), capacity_(capacity),
         items_(allocator_traits::allocate(alloc_, capacity)), head_(0),
         tail_(0) {
-    for (auto i = 0; i < capacity_; ++i) {
+    for (size_type i = 0; i < capacity_; ++i) {
       allocator_traits::construct(alloc_, &items_[i]);
     }
   }
@@ -32,39 +32,43 @@ public:
   MpscQueue &operator=(MpscQueue &&) = delete;
 
   ~MpscQueue() {
-    auto tail = tail_.load(std::memory_order_relaxed);
-    auto head = head_.load(std::memory_order_relaxed);
-    while (tail != head) {
-      items_[tail % capacity_].~T();
-      ++tail;
+    for (size_type i = 0; i < capacity_; ++i) {
+      items_[i].~Cell();
     }
     allocator_traits::deallocate(alloc_, items_, capacity_);
   }
 
   bool push(T const &value) {
-
-    auto head = head_.fetch_add(1, std::memory_order_relaxed);
-    auto tail = tail_.load(std::memory_order_acquire);
-    if (full(head, tail)) {
-      return false;
+    /* CAS-loop claim: only advance head if there's room. fetch_add would
+     * irreversibly inflate head on a full queue. */
+    auto head = head_.load(std::memory_order_relaxed);
+    for (;;) {
+      auto tail = tail_.load(std::memory_order_acquire);
+      if (full(head, tail))
+        return false;
+      if (head_.compare_exchange_weak(head, head + 1, std::memory_order_relaxed,
+                                      std::memory_order_relaxed))
+        break;
+      /* CAS failed: another producer claimed `head`. CAS updated `head` with
+       * the new value; loop and retry. */
     }
-    element(head).data_ = value;
-    element(head).is_ready.store(true, std::memory_order_release);
+    auto &cell = element(head);
+    cell.data_ = value;
+    cell.is_ready.store(true, std::memory_order_release);
     return true;
   }
 
   bool pop(T &value) {
-    auto tail = tail_.fetch_add(1, std::memory_order_relaxed);
+    /* Single consumer: tail is consumer-owned, no atomic claim needed. */
+    auto tail = tail_.load(std::memory_order_relaxed);
     auto head = head_.load(std::memory_order_acquire);
-    if (empty(head, tail)) {
+    if (empty(head, tail))
       return false;
-    }
-    auto cell = element(tail);
-    auto is_ready = cell->is_ready.load(std::memory_order_acquire);
-    if (!is_ready)
-      return false;
-    value = cell->data_;
-    cell->is_ready.store(false, std::memory_order_relaxed);
+    auto &cell = element(tail);
+    if (!cell.is_ready.load(std::memory_order_acquire))
+      return false; /* slot claimed but producer hasn't finished writing */
+    value = std::move(cell.data_);
+    cell.is_ready.store(false, std::memory_order_relaxed);
     tail_.store(tail + 1, std::memory_order_release);
     return true;
   }
@@ -80,9 +84,9 @@ public:
 
 private:
   bool empty(size_type head, size_type tail) const { return head == tail; }
-  T *element(size_type idx) { return &items_[idx % capacity_]; }
+  Cell<T> &element(size_type idx) { return items_[idx % capacity_]; }
   bool full(size_type head, size_type tail) const {
-    return head - tail == capacity_;
+    return head - tail >= capacity_;
   }
 
 private:

@@ -44,7 +44,7 @@
 // ---- single-threaded -------------------------------------------------------
 
 static void test_construction() {
-    ip::SpscQueue<int> q(8);
+    ip::MpscQueue<int> q(8);
     ASSERT_EQ(q.capacity(), 8u);
     ASSERT_TRUE(q.empty());
     ASSERT_TRUE(!q.full());
@@ -53,7 +53,7 @@ static void test_construction() {
 }
 
 static void test_single_push_pop() {
-    ip::SpscQueue<int> q(8);
+    ip::MpscQueue<int> q(8);
     int v = 0;
     ASSERT_TRUE(!q.pop(v));                // empty
     ASSERT_TRUE(q.push(42));
@@ -65,7 +65,7 @@ static void test_single_push_pop() {
 }
 
 static void test_fill_to_capacity() {
-    ip::SpscQueue<int> q(4);
+    ip::MpscQueue<int> q(4);
     for (int i = 0; i < 4; ++i) ASSERT_TRUE(q.push(i));
     ASSERT_TRUE(q.full());
     ASSERT_TRUE(!q.push(99));              // over-capacity rejected
@@ -81,7 +81,7 @@ static void test_fill_to_capacity() {
 
 static void test_wrap_around() {
     // 1000 push/pop pairs through a 4-slot ring exercises masked-index wrap.
-    ip::SpscQueue<int> q(4);
+    ip::MpscQueue<int> q(4);
     int v;
     for (int i = 0; i < 1000; ++i) {
         ASSERT_TRUE(q.push(i));
@@ -97,7 +97,7 @@ static constexpr std::uint32_t kSpscCap   = 1024;
 static constexpr std::uint32_t kSpscItems = 1u << 22;     // ~4M
 
 static void test_concurrent_spsc() {
-    ip::SpscQueue<std::uint32_t> q(kSpscCap);
+    ip::MpscQueue<std::uint32_t> q(kSpscCap);
     std::atomic<bool> ready{false};
     std::atomic<bool> ok{true};
 
@@ -133,10 +133,6 @@ static void test_concurrent_spsc() {
 }
 
 // ---- MPSC concurrent: N producers + 1 consumer ----------------------------
-// Enable once your queue is safe under multiple producers (use atomic claim
-// on head, e.g. fetch_add, plus a per-slot ready flag — see notes in your
-// MPSC writeup).
-//
 // Invariants verified:
 //   - every (producer_id, seq) pair pushed appears exactly once on the
 //     consumer side
@@ -156,7 +152,7 @@ static inline std::uint32_t unpack_pid(std::uint64_t v) { return static_cast<std
 static inline std::uint32_t unpack_seq(std::uint64_t v) { return static_cast<std::uint32_t>(v); }
 
 [[maybe_unused]] static void test_concurrent_mpsc() {
-    ip::SpscQueue<std::uint64_t> q(kMpscCap);
+    ip::MpscQueue<std::uint64_t> q(kMpscCap);
     std::atomic<bool> ready{false};
 
     std::vector<std::thread> producers;
@@ -212,15 +208,9 @@ static inline std::uint32_t unpack_seq(std::uint64_t v) { return static_cast<std
 }
 
 // ---- MPMC concurrent: N producers + M consumers ---------------------------
-// Enable once your queue is safe under both contended ends (Vyukov's per-cell
-// sequence numbers, or another MPMC algorithm).
-//
 // Invariants verified:
 //   - the union of all consumed items equals the set of all produced items
 //     (no duplicates, no losses)
-//   - per-producer ordering is NOT verified across consumers — different
-//     consumers can see different interleavings of a producer's items, which
-//     is allowed under MPMC.
 
 static constexpr std::uint32_t kMpmcProducers = 4;
 static constexpr std::uint32_t kMpmcConsumers = 4;
@@ -228,7 +218,7 @@ static constexpr std::uint32_t kMpmcPerProd   = 1u << 17;   // 128K each
 static constexpr std::uint32_t kMpmcCap       = 1024;
 
 [[maybe_unused]] static void test_concurrent_mpmc() {
-    ip::SpscQueue<std::uint64_t> q(kMpmcCap);
+    ip::MpscQueue<std::uint64_t> q(kMpmcCap);
     std::atomic<bool> ready{false};
     std::atomic<std::uint64_t> total_consumed{0};
     const std::uint64_t expected_total = std::uint64_t(kMpmcProducers) * kMpmcPerProd;
@@ -271,7 +261,6 @@ static constexpr std::uint32_t kMpmcCap       = 1024;
             ASSERT_TRUE(seen.insert(x).second);    // false → duplicate
     ASSERT_EQ(seen.size(), expected_total);
 
-    // Spot-check membership: every (p, i) pair we expected is in `seen`.
     for (std::uint32_t p = 0; p < kMpmcProducers; ++p)
         for (std::uint32_t i = 0; i < kMpmcPerProd; ++i)
             ASSERT_TRUE(seen.count(pack(p, i)) == 1);
@@ -289,9 +278,9 @@ int main() {
     test_fill_to_capacity();
     test_wrap_around();
     test_concurrent_spsc();
+    test_concurrent_mpsc();        // ← MPSC implementation now in place
 
-    // Uncomment as you implement each variant:
-    // test_concurrent_mpsc();
+    // Uncomment when you implement MPMC:
     // test_concurrent_mpmc();
 
     std::cout << "ALL OK\n";
