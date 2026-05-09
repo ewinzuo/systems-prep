@@ -10,9 +10,10 @@
 #   sudo mount -t 9p -o trans=virtio hostfs /mnt
 #   cd /mnt/03-userspace-driver-dma-c
 #   make
-#   sudo insmod nic.ko
-#   dmesg | tail          # look for "nic: smoke test PASSED"
+#   sudo insmod nic.ko    # probe fires, smoke test runs
+#   dmesg | tail          # look for "smoke test PASSED"
 #   sudo rmmod nic
+#   lspci                 # should show "1234:11e8 edu device"
 #
 # To exit: Ctrl-A then X
 
@@ -31,6 +32,7 @@ QEMU_ARGS=(
     -drive "file=${VM_DIR}/disk.qcow2,format=qcow2"
     -drive "file=${VM_DIR}/seed.img,format=raw"
     -virtfs "local,path=${HOST_SHARE},mount_tag=hostfs,security_model=mapped-xattr,id=host"
+    -device edu
     -net nic -net user
 )
 
