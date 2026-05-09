@@ -8,15 +8,31 @@
 #include <linux/dma-mapping.h>
 
 /* ========================================================================= */
-/*  SPSC ring helpers (same as memcpy version — ring logic doesn't change)   */
+/*  SPSC ring helpers                                                        */
+/*                                                                           */
+/*  Rings are allocated with dma_alloc_coherent so they live in DMA-able     */
+/*  memory. This is how real drivers (NVMe, mlx5, Neuron) allocate their     */
+/*  SQ/CQ rings — the device can read them directly via DMA.                 */
+/*                                                                           */
+/*  dma_alloc_coherent returns two things:                                   */
+/*    - buf:        CPU virtual address (we use this for push/pop)           */
+/*    - dma_handle: device-visible DMA address (we'd give this to hardware)  */
+/*                                                                           */
+/*  "Coherent" means no explicit cache flushes needed — both CPU and device  */
+/*  always see the latest data. The tradeoff is it may be slower than        */
+/*  streaming DMA (dma_map_single) on some architectures.                    */
 /* ========================================================================= */
 
-static int ring_init(struct spsc_ring *r, u32 depth, u32 elem_size)
+static int ring_init(struct spsc_ring *r, struct device *dev,
+                     u32 depth, u32 elem_size)
 {
+    size_t size;
+
     if (depth == 0 || (depth & (depth - 1)) != 0 || elem_size == 0)
         return -EINVAL;
 
-    r->buf = kmalloc_array(depth, elem_size, GFP_KERNEL);
+    size = (size_t)depth * elem_size;
+    r->buf = dma_alloc_coherent(dev, size, &r->dma_handle, GFP_KERNEL);
     if (!r->buf)
         return -ENOMEM;
 
@@ -28,10 +44,13 @@ static int ring_init(struct spsc_ring *r, u32 depth, u32 elem_size)
     return 0;
 }
 
-static void ring_destroy(struct spsc_ring *r)
+static void ring_destroy(struct spsc_ring *r, struct device *dev)
 {
-    kfree(r->buf);
-    r->buf = NULL;
+    if (r->buf) {
+        dma_free_coherent(dev, (size_t)r->depth * r->elem_size,
+                          r->buf, r->dma_handle);
+        r->buf = NULL;
+    }
 }
 
 static int ring_push(struct spsc_ring *r, const void *elem)
@@ -297,11 +316,11 @@ engine_t *engine_create(struct pci_dev *pdev, u32 sq_depth, u32 cq_depth)
 
     /* --- Ring + thread setup (same as memcpy version) --- */
 
-    ret = ring_init(&eng->sq, sq_depth, sizeof(sqe_t));
+    ret = ring_init(&eng->sq, &pdev->dev, sq_depth, sizeof(sqe_t));
     if (ret)
         goto err_irq;
 
-    ret = ring_init(&eng->cq, cq_depth, sizeof(cqe_t));
+    ret = ring_init(&eng->cq, &pdev->dev, cq_depth, sizeof(cqe_t));
     if (ret)
         goto err_sq;
 
@@ -318,9 +337,9 @@ engine_t *engine_create(struct pci_dev *pdev, u32 sq_depth, u32 cq_depth)
     return eng;
 
 err_cq:
-    ring_destroy(&eng->cq);
+    ring_destroy(&eng->cq, &pdev->dev);
 err_sq:
-    ring_destroy(&eng->sq);
+    ring_destroy(&eng->sq, &pdev->dev);
 err_irq:
     free_irq(pdev->irq, eng);
 err_unmap:
@@ -342,8 +361,8 @@ void engine_destroy(engine_t *eng)
 
     kthread_stop(eng->dev_thread);
 
-    ring_destroy(&eng->sq);
-    ring_destroy(&eng->cq);
+    ring_destroy(&eng->sq, &eng->pdev->dev);
+    ring_destroy(&eng->cq, &eng->pdev->dev);
 
     free_irq(eng->pdev->irq, eng);
     pci_clear_master(eng->pdev);

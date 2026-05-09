@@ -59,12 +59,13 @@ typedef struct {
 /* --- SPSC ring (kernel-space) -------------------------------------------- */
 
 struct spsc_ring {
-    char   *buf;
-    u32     elem_size;
-    u32     depth;
-    u32     mask;
-    u32     head;       /* consumer reads here */
-    u32     tail;       /* producer writes here */
+    char       *buf;        /* CPU virtual address (from dma_alloc_coherent) */
+    dma_addr_t  dma_handle; /* device-visible DMA address */
+    u32         elem_size;
+    u32         depth;
+    u32         mask;
+    u32         head;       /* consumer reads here */
+    u32         tail;       /* producer writes here */
 };
 
 /* --- Engine (single DMA engine backed by QEMU edu device) ---------------- */
