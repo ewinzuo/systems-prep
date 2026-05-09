@@ -1,45 +1,63 @@
 #ifndef NIC_H
 #define NIC_H
 
-#include <stddef.h>
-#include <stdint.h>
+#include <linux/types.h>
+#include <linux/kthread.h>
+#include <linux/wait.h>
+#include <linux/atomic.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+/* --- Descriptor types ---------------------------------------------------- */
 
-typedef struct nic nic_t;
+typedef enum { DMA_OP_TX = 1, DMA_OP_RX = 2 } dma_op_t;
 
-typedef enum { NIC_OP_TX = 1, NIC_OP_RX = 2 } nic_op_t;
+/* Submission queue entry — host -> device */
+typedef struct {
+    u64         cookie;     /* host-defined; echoed on completion */
+    void       *src;        /* source buffer (kernel virtual address) */
+    void       *dst;        /* destination buffer */
+    u32         len;        /* transfer length in bytes */
+    dma_op_t    op;
+} sqe_t;
+
+/* Completion queue entry — device -> host */
+typedef struct {
+    u64         cookie;
+    s32         status;         /* 0 = ok, negative = error */
+    u32         bytes_xferred;
+} cqe_t;
+
+/* --- SPSC ring (kernel-space, no libc) ----------------------------------- */
+
+struct spsc_ring {
+    char   *buf;
+    u32     elem_size;
+    u32     depth;
+    u32     mask;       /* depth - 1 */
+    u32     head;       /* consumer reads here, advances after read */
+    u32     tail;       /* producer writes here, advances after write */
+};
+
+/* --- Engine (single DMA engine) ------------------------------------------ */
 
 typedef struct {
-    uint64_t  cookie;     /* host-defined; echoed on completion */
-    void     *buf;        /* TX: source; RX: destination */
-    uint32_t  len;
-    nic_op_t  op;
-} nic_sqe_t;
+    struct spsc_ring    sq;         /* SQE ring: host pushes, device pops */
+    struct spsc_ring    cq;         /* CQE ring: device pushes, host pops */
 
-typedef struct {
-    uint64_t cookie;
-    int32_t  status;      /* 0 = ok, negative = errno-like */
-} nic_cqe_t;
+    atomic_t            doorbell;   /* host increments to wake device */
 
-/* sq_depth and cq_depth must be power-of-two. */
-nic_t *nic_open(size_t sq_depth, size_t cq_depth);
-void   nic_close(nic_t *n);
+    wait_queue_head_t   dev_wq;     /* device thread sleeps here */
+    wait_queue_head_t   host_wq;    /* host waits for completions */
 
-/* Returns 0 on success, -1 if SQ full. Buffer must remain alive
- * until a matching CQE arrives. */
-int    nic_submit(nic_t *n, const nic_sqe_t *sqe);
+    struct task_struct *dev_thread;
+} engine_t;
 
-/* Doorbell the device — wakes any blocked worker; cheap if not blocked. */
-void   nic_doorbell(nic_t *n);
+/* --- API ----------------------------------------------------------------- */
 
-/* Drain up to max CQEs into out[]. Returns count actually copied. */
-size_t nic_drain(nic_t *n, nic_cqe_t *out, size_t max);
-
-#ifdef __cplusplus
-}
-#endif
+engine_t *engine_create(u32 sq_depth, u32 cq_depth);
+void      engine_destroy(engine_t *eng);
+int       engine_submit(engine_t *eng, const sqe_t *sqe);
+void      engine_doorbell(engine_t *eng);
+size_t    engine_drain(engine_t *eng, cqe_t *out, size_t max);
+int       engine_wait(engine_t *eng, long timeout_jiffies);
 
 #endif /* NIC_H */
