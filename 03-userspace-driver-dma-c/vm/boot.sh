@@ -13,7 +13,7 @@
 #   sudo insmod nic.ko    # probe fires, smoke test runs
 #   dmesg | tail          # look for "smoke test PASSED"
 #   sudo rmmod nic
-#   lspci                 # should show "1234:11e8 edu device"
+#   lspci                 # should show "1234:dea1"
 #
 # To exit: Ctrl-A then X
 
@@ -21,9 +21,19 @@ set -euo pipefail
 
 VM_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "${VM_DIR}/.." && pwd)"
-
-# Share the entire systems-prep directory so the module can find sources
 HOST_SHARE="$(cd "${PROJECT_DIR}/.." && pwd)"
+
+# Use custom QEMU if built, otherwise fall back to system QEMU
+QEMU="${VM_DIR}/qemu-build/qemu-system-x86_64"
+if [ ! -x "$QEMU" ]; then
+    QEMU="$(command -v qemu-system-x86_64 2>/dev/null || true)"
+    if [ -z "$QEMU" ]; then
+        echo ">>> ERROR: No QEMU found. Run: nix-shell shell.nix --run 'bash build-qemu.sh'"
+        exit 1
+    fi
+    echo ">>> WARNING: Using system QEMU — custom dma_engine device may not be available"
+    echo ">>>          Build custom QEMU with: nix-shell shell.nix --run 'bash build-qemu.sh'"
+fi
 
 QEMU_ARGS=(
     -m 2G
@@ -32,7 +42,7 @@ QEMU_ARGS=(
     -drive "file=${VM_DIR}/disk.qcow2,format=qcow2"
     -drive "file=${VM_DIR}/seed.img,format=raw"
     -virtfs "local,path=${HOST_SHARE},mount_tag=hostfs,security_model=mapped-xattr,id=host"
-    -device edu
+    -device dma_engine
     -net nic -net user
 )
 
@@ -44,8 +54,9 @@ else
     echo ">>> No KVM — VM will be slow but functional"
 fi
 
+echo ">>> Using QEMU: ${QEMU}"
 echo ">>> Booting VM (Ctrl-A X to quit)..."
 echo ">>> Login: ubuntu / ubuntu"
 echo ""
 
-qemu-system-x86_64 "${QEMU_ARGS[@]}"
+"$QEMU" "${QEMU_ARGS[@]}"

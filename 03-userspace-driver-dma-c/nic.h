@@ -2,97 +2,103 @@
 #define NIC_H
 
 #include <linux/types.h>
-#include <linux/kthread.h>
 #include <linux/wait.h>
-#include <linux/atomic.h>
 #include <linux/pci.h>
 
-/* --- EDU device register offsets ----------------------------------------- */
+/* --- DMA engine device register offsets ---------------------------------- */
+/*                                                                           */
+/* These match the QEMU dma_engine device (vm/dma_engine.c).                 */
+/* All registers are 32-bit. 64-bit addresses use two consecutive regs.      */
 
-#define EDU_REG_ID          0x00    /* RO: device identity */
-#define EDU_REG_LIVENESS    0x04    /* RW: write X, read ~X */
-#define EDU_REG_STATUS      0x20    /* RW: status flags */
-#define EDU_REG_IRQ_STATUS  0x24    /* RO: interrupt status */
-#define EDU_REG_IRQ_RAISE   0x60    /* WO: raise interrupt */
-#define EDU_REG_IRQ_ACK     0x64    /* WO: acknowledge interrupt */
+#define REG_DEVICE_ID       0x00    /* RO: magic 0xDEA10001 */
+#define REG_DEVICE_STATUS   0x04    /* RO: bit 0 = ready */
+#define REG_SQ_BASE_LO      0x08    /* RW: SQ ring DMA addr low */
+#define REG_SQ_BASE_HI      0x0C    /* RW: SQ ring DMA addr high */
+#define REG_CQ_BASE_LO      0x10    /* RW: CQ ring DMA addr low */
+#define REG_CQ_BASE_HI      0x14    /* RW: CQ ring DMA addr high */
+#define REG_SQ_DEPTH        0x18    /* RW: number of SQ slots (power of 2) */
+#define REG_CQ_DEPTH        0x1C    /* RW: number of CQ slots (power of 2) */
+#define REG_SQ_DOORBELL     0x20    /* WO: write new SQ tail to kick device */
+#define REG_IRQ_STATUS      0x24    /* RO: interrupt status bits */
+#define REG_IRQ_ACK         0x28    /* WO: write to clear IRQ */
+#define REG_SQ_HEAD         0x2C    /* RO: device's SQ consumer index */
+#define REG_CQ_TAIL         0x30    /* RO: device's CQ producer index */
 
-#define EDU_REG_DMA_SRC     0x80    /* RW 8B: DMA source address */
-#define EDU_REG_DMA_DST     0x88    /* RW 8B: DMA destination address */
-#define EDU_REG_DMA_COUNT   0x90    /* RW 8B: transfer byte count */
-#define EDU_REG_DMA_CMD     0x98    /* RW 8B: DMA command register */
-
-/* DMA command bits */
-#define EDU_DMA_START       0x01    /* start transfer */
-#define EDU_DMA_DIR         0x02    /* 0 = RAM->EDU, 1 = EDU->RAM */
-#define EDU_DMA_IRQ         0x04    /* raise IRQ on completion */
-
-/* Device internal DMA buffer */
-#define EDU_BUF_OFFSET      0x40000
-#define EDU_BUF_SIZE        4096
+#define DEVICE_ID_MAGIC     0xDEA10001
+#define DEV_BUF_SIZE        4096
 
 /* PCI IDs */
-#define EDU_VENDOR_ID       0x1234
-#define EDU_DEVICE_ID       0x11e8
-
-/* Interrupt status bit for DMA completion */
-#define EDU_IRQ_DMA_BIT     0x100
+#define DMA_ENGINE_VENDOR_ID  0x1234
+#define DMA_ENGINE_DEVICE_ID  0xdea1
 
 /* --- Descriptor types ---------------------------------------------------- */
+/*                                                                           */
+/* These structs are shared between the kernel driver and the QEMU device.   */
+/* The device DMA-reads SQEs and DMA-writes CQEs, so layouts must match.     */
 
 typedef enum { DMA_OP_TX = 1, DMA_OP_RX = 2 } dma_op_t;
 
-/* Submission queue entry — host -> device */
+/* Submission queue entry — driver -> device (24 bytes, packed) */
 typedef struct {
-    u64         cookie;     /* host-defined; echoed on completion */
-    void       *buf;        /* TX: source in host RAM; RX: destination */
-    u32         len;        /* transfer length (<= EDU_BUF_SIZE) */
-    dma_op_t    op;
-} sqe_t;
+    u64         cookie;     /* driver-defined; echoed on completion */
+    u64         buf_addr;   /* DMA address of data buffer */
+    u32         len;        /* transfer length (<= DEV_BUF_SIZE) */
+    u32         op;         /* DMA_OP_TX or DMA_OP_RX */
+} __packed sqe_t;
 
-/* Completion queue entry — device -> host */
+/* Completion queue entry — device -> driver (16 bytes, packed) */
 typedef struct {
     u64         cookie;
     s32         status;         /* 0 = ok, negative = error */
     u32         bytes_xferred;
-} cqe_t;
+} __packed cqe_t;
 
-/* --- SPSC ring (kernel-space) -------------------------------------------- */
-
-struct spsc_ring {
-    char       *buf;        /* CPU virtual address (from dma_alloc_coherent) */
-    dma_addr_t  dma_handle; /* device-visible DMA address */
-    u32         elem_size;
-    u32         depth;
-    u32         mask;
-    u32         head;       /* consumer reads here */
-    u32         tail;       /* producer writes here */
-};
-
-/* --- Engine (single DMA engine backed by QEMU edu device) ---------------- */
+/* --- Engine -------------------------------------------------------------- */
+/*                                                                           */
+/* No kthread, no SPSC ring helpers. The device does all DMA processing.     */
+/* The driver just writes SQEs into coherent memory and pokes the doorbell.  */
 
 typedef struct {
-    struct spsc_ring    sq;         /* SQE ring: host pushes, device pops */
-    struct spsc_ring    cq;         /* CQE ring: device pushes, host pops */
+    /* SQ ring (allocated with dma_alloc_coherent) */
+    sqe_t          *sq;         /* CPU virtual address */
+    dma_addr_t      sq_dma;     /* device-visible DMA address */
+    u32             sq_depth;
+    u32             sq_tail;    /* driver's next write slot */
 
-    atomic_t            doorbell;   /* host increments to wake device */
+    /* CQ ring (allocated with dma_alloc_coherent) */
+    cqe_t          *cq;         /* CPU virtual address */
+    dma_addr_t      cq_dma;     /* device-visible DMA address */
+    u32             cq_depth;
+    u32             cq_head;    /* driver's next read slot */
 
-    wait_queue_head_t   dev_wq;     /* device thread sleeps here */
-    wait_queue_head_t   host_wq;    /* host waits for completions */
-    wait_queue_head_t   dma_wq;     /* device thread waits for DMA IRQ */
+    /* PCI / MMIO */
+    struct pci_dev *pdev;
+    void __iomem   *mmio;
 
-    struct task_struct *dev_thread;
-    struct pci_dev     *pdev;       /* PCI device handle */
-    void __iomem       *mmio;       /* BAR0 mapped address */
-    atomic_t            dma_done;   /* set by IRQ handler */
+    /* Completion notification */
+    wait_queue_head_t host_wq;
 } engine_t;
 
 /* --- API ----------------------------------------------------------------- */
 
 engine_t *engine_create(struct pci_dev *pdev, u32 sq_depth, u32 cq_depth);
 void      engine_destroy(engine_t *eng);
+
+/* Write SQE into SQ ring. Returns 0 on success, -EAGAIN if full.
+ * Caller must dma_map_single the data buffer first and pass the
+ * resulting dma_addr_t in sqe->buf_addr. */
 int       engine_submit(engine_t *eng, const sqe_t *sqe);
+
+/* Write SQ tail to doorbell register — one MMIO write.
+ * Coalesces: submit N then doorbell once. */
 void      engine_doorbell(engine_t *eng);
+
+/* Read completed CQEs from CQ ring. Returns count copied.
+ * Caller must dma_unmap_single the data buffers after processing. */
 size_t    engine_drain(engine_t *eng, cqe_t *out, size_t max);
+
+/* Block until at least one CQE is available, or timeout.
+ * timeout_jiffies < 0 means wait forever. */
 int       engine_wait(engine_t *eng, long timeout_jiffies);
 
 #endif /* NIC_H */
