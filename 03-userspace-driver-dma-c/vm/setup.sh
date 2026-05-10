@@ -26,7 +26,8 @@ VM_DIR="$(cd "$(dirname "$0")" && pwd)"
 DISK="${VM_DIR}/disk.qcow2"
 SEED="${VM_DIR}/seed.img"
 IMG="${VM_DIR}/base.img"
-IMG_URL="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+# Primary: Ubuntu cloud images. Fallback: use Debian if Ubuntu is unreachable.
+IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
 
 # Download Ubuntu cloud image
 if [ ! -f "$IMG" ]; then
@@ -62,7 +63,22 @@ instance-id: nic-dev
 local-hostname: nic-dev
 EOF
 
-    cloud-localds "$SEED" "${VM_DIR}/user-data" "${VM_DIR}/meta-data"
+    # Create seed ISO with whatever tool is available
+    if command -v cloud-localds &> /dev/null; then
+        cloud-localds "$SEED" "${VM_DIR}/user-data" "${VM_DIR}/meta-data"
+    elif command -v genisoimage &> /dev/null; then
+        genisoimage -output "$SEED" -volid cidata -joliet -rock \
+            "${VM_DIR}/user-data" "${VM_DIR}/meta-data"
+    elif command -v xorriso &> /dev/null; then
+        xorriso -as mkisofs -o "$SEED" -V cidata -J -R \
+            "${VM_DIR}/user-data" "${VM_DIR}/meta-data"
+    elif command -v mkisofs &> /dev/null; then
+        mkisofs -output "$SEED" -volid cidata -joliet -rock \
+            "${VM_DIR}/user-data" "${VM_DIR}/meta-data"
+    else
+        echo "ERROR: No ISO tool found. Install one of: cloud-image-utils, genisoimage, xorriso"
+        exit 1
+    fi
     echo ">>> Seed image created."
 fi
 

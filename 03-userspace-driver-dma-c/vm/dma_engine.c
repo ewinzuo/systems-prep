@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/pci/pci_device.h"
+#include "hw/pci/pci.h"
 #include "hw/pci/msi.h"
 #include "hw/qdev-properties.h"
 #include "qemu/timer.h"
@@ -319,7 +320,7 @@ static void dma_engine_exit(PCIDevice *pdev)
 
 /* --- QOM type registration ----------------------------------------------- */
 
-static void dma_engine_class_init(ObjectClass *klass, const void *data)
+static void dma_engine_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(klass);
