@@ -1,0 +1,22 @@
+# Build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+Module.symvers
+modules.order
+.module-common.o
+
+# VM disk images and QEMU build
+03-userspace-driver-dma-c/vm/*.img
+03-userspace-driver-dma-c/vm/*.qcow2
+03-userspace-driver-dma-c/vm/qemu-10.0.0/
+03-userspace-driver-dma-c/vm/qemu-10.0.0.tar.xz
+03-userspace-driver-dma-c/vm/qemu-build/
+03-userspace-driver-dma-c/vm/.direnv/
+03-userspace-driver-dma-c/vm/.venv/
+03-userspace-driver-dma-c/vm/.initrd.img
+03-userspace-driver-dma-c/vm/.qemu-wrapper
+03-userspace-driver-dma-c/vm/nic-dev.qcow2
