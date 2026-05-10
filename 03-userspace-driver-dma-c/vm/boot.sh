@@ -43,7 +43,7 @@ QEMU_ARGS=(
     -drive "file=${VM_DIR}/seed.img,format=raw"
     -virtfs "local,path=${HOST_SHARE},mount_tag=hostfs,security_model=mapped-xattr,id=host"
     -device dma_engine
-    -net nic -net user
+    -nic user,model=virtio
 )
 
 # Use KVM if available (Linux only, much faster)

@@ -320,7 +320,7 @@ static void dma_engine_exit(PCIDevice *pdev)
 
 /* --- QOM type registration ----------------------------------------------- */
 
-static void dma_engine_class_init(ObjectClass *klass, const void *data)
+static void dma_engine_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(klass);

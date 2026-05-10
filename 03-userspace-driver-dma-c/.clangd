@@ -1,8 +1,16 @@
 CompileFlags:
   Add:
+    - -xc
+    - -std=gnu11
     - -D__KERNEL__
     - -DMODULE
     - -I/home/ewin/.local/share/linux-kernel-dev/source/include
     - -I/home/ewin/.local/share/linux-kernel-dev/source/arch/x86/include
     - -I/home/ewin/.local/share/linux-kernel-dev/build/include
     - -I/home/ewin/.local/share/linux-kernel-dev/build/include/generated
+  Remove:
+    - -W*
+Diagnostics:
+  Suppress:
+    - incompatible_pointer_types
+    - int_conversion
