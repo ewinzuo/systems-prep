@@ -29,11 +29,15 @@ static irqreturn_t dma_engine_irq(int irq, void *data)
     engine_t *eng = data;
     u32 status;
 
+    /* Check if this interrupt is ours */
     status = ioread32(eng->mmio + REG_IRQ_STATUS);
     if (!status)
-        return IRQ_NONE;
+        return IRQ_NONE;  /* not our interrupt (shared IRQ line) */
 
+    /* Acknowledge — clears the device's IRQ line */
     iowrite32(status, eng->mmio + REG_IRQ_ACK);
+
+    /* Wake anyone blocked in engine_wait() */
     wake_up_interruptible(&eng->host_wq);
 
     return IRQ_HANDLED;
@@ -57,7 +61,9 @@ engine_t *engine_create(struct pci_dev *pdev, u32 sq_depth, u32 cq_depth)
     eng->sq_depth = sq_depth;
     eng->cq_depth = cq_depth;
 
-    /* --- PCI setup --- */
+    /* ---- 1. PCI device setup ----
+     * Enable device, claim BAR0, map it into kernel virtual address space,
+     * and enable bus mastering (allows device to initiate DMA). */
 
     ret = pci_enable_device(pdev);
     if (ret)
@@ -73,13 +79,21 @@ engine_t *engine_create(struct pci_dev *pdev, u32 sq_depth, u32 cq_depth)
         goto err_region;
     }
 
-    pci_set_master(pdev);
+    pci_set_master(pdev);  /* without this, device can't DMA */
+
+    /* ---- 2. DMA mask ----
+     * Tell the kernel this device can address all 64 bits of memory.
+     * The DMA allocator uses this to pick appropriate memory regions. */
 
     ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
     if (ret)
         goto err_unmap;
 
-    /* --- Allocate SQ/CQ rings in DMA-coherent memory --- */
+    /* ---- 3. Allocate SQ/CQ rings (DMA coherent) ----
+     * dma_alloc_coherent returns two things:
+     *   - eng->sq:     CPU virtual address (driver reads/writes this)
+     *   - eng->sq_dma: DMA address (device uses this to access same memory)
+     * "Coherent" = no cache flushes needed, both sides always see latest. */
 
     eng->sq = dma_alloc_coherent(&pdev->dev,
                                  sq_depth * sizeof(sqe_t),
@@ -93,14 +107,18 @@ engine_t *engine_create(struct pci_dev *pdev, u32 sq_depth, u32 cq_depth)
     if (!eng->cq)
         goto err_sq;
 
-    /* --- Program device registers with ring addresses --- */
+    /* ---- 4. Program device with ring locations ----
+     * Write the DMA addresses to device registers via MMIO so the device
+     * knows where to DMA-read SQEs from and DMA-write CQEs to. */
 
     mmio_write64(eng->mmio, REG_SQ_BASE_LO, eng->sq_dma);
     mmio_write64(eng->mmio, REG_CQ_BASE_LO, eng->cq_dma);
     iowrite32(sq_depth, eng->mmio + REG_SQ_DEPTH);
     iowrite32(cq_depth, eng->mmio + REG_CQ_DEPTH);
 
-    /* --- MSI interrupt setup --- */
+    /* ---- 5. MSI interrupt setup ----
+     * Allocate one MSI vector and register our IRQ handler.
+     * Device raises MSI after writing CQEs — handler wakes host_wq. */
 
     ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI | PCI_IRQ_INTX);
     if (ret < 0)
@@ -111,18 +129,19 @@ engine_t *engine_create(struct pci_dev *pdev, u32 sq_depth, u32 cq_depth)
     if (ret)
         goto err_irq_vec;
 
-    /* --- Init driver state --- */
+    /* ---- 6. Driver state init ---- */
 
     eng->sq_tail = 0;
     eng->cq_head = 0;
     init_waitqueue_head(&eng->host_wq);
 
-    /* Verify device identity */
+    /* Sanity check: read device ID register */
     id = ioread32(eng->mmio + REG_DEVICE_ID);
     dev_info(&pdev->dev, "dma_engine device id=0x%08x\n", id);
 
     return eng;
 
+    /* ---- Error cleanup (reverse order of setup) ---- */
 err_irq_vec:
     pci_free_irq_vectors(pdev);
 err_cq:
@@ -148,6 +167,7 @@ void engine_destroy(engine_t *eng)
     if (!eng)
         return;
 
+    /* Teardown in reverse order of engine_create */
     free_irq(pci_irq_vector(eng->pdev, 0), eng);
     pci_free_irq_vectors(eng->pdev);
 
@@ -166,40 +186,48 @@ void engine_destroy(engine_t *eng)
     kfree(eng);
 }
 
+/* ---- Submit: write one SQE into the submission ring ---- */
 int engine_submit(engine_t *eng, const sqe_t *sqe)
 {
+    /* Read device's consumer index to check for backpressure */
     u32 sq_head = ioread32(eng->mmio + REG_SQ_HEAD);
     u32 tail = eng->sq_tail;
 
-    /* Check if SQ is full */
     if (tail - sq_head >= eng->sq_depth)
-        return -EAGAIN;
+        return -EAGAIN;  /* SQ full — caller should retry or wait */
 
-    /* Write SQE into coherent DMA memory */
+    /* Write SQE into the coherent DMA ring at tail position.
+     * The device will read this via pci_dma_read after doorbell. */
     eng->sq[tail & (eng->sq_depth - 1)] = *sqe;
 
-    /* Ensure SQE is visible in memory before we advance tail */
+    /* wmb: ensure SQE data is committed to memory before tail advances.
+     * Without this, the device could see the new tail but read stale SQE data. */
     wmb();
 
     eng->sq_tail = tail + 1;
     return 0;
 }
 
+/* ---- Doorbell: notify device that new SQEs are available ---- */
 void engine_doorbell(engine_t *eng)
 {
-    /* Single MMIO write — device wakes up and DMA-reads the SQEs */
+    /* Single MMIO write. In real hardware this hits a PCIe BAR register.
+     * The device wakes up and processes SQEs from sq_head up to this tail. */
     iowrite32(eng->sq_tail, eng->mmio + REG_SQ_DOORBELL);
 }
 
+/* ---- Drain: read completed CQEs from the completion ring ---- */
 size_t engine_drain(engine_t *eng, cqe_t *out, size_t max)
 {
+    /* Read device's producer index — how many CQEs it has written */
     u32 cq_tail = ioread32(eng->mmio + REG_CQ_TAIL);
     u32 head = eng->cq_head;
     u32 avail = cq_tail - head;
     u32 n = min_t(u32, avail, (u32)max);
     u32 i;
 
-    /* Read CQE data before advancing head */
+    /* rmb: ensure we read CQE data AFTER seeing the updated tail.
+     * Without this, CPU could speculatively read stale CQE data. */
     rmb();
 
     for (i = 0; i < n; i++)
@@ -209,10 +237,13 @@ size_t engine_drain(engine_t *eng, cqe_t *out, size_t max)
     return n;
 }
 
+/* ---- Wait: block until device posts at least one CQE ---- */
 int engine_wait(engine_t *eng, long timeout_jiffies)
 {
     long ret;
 
+    /* Sleep until IRQ handler calls wake_up (triggered by device MSI).
+     * Condition re-checked each wakeup: has cq_tail advanced past our head? */
     if (timeout_jiffies < 0) {
         wait_event_interruptible(eng->host_wq,
             ioread32(eng->mmio + REG_CQ_TAIL) != eng->cq_head);
@@ -226,7 +257,12 @@ int engine_wait(engine_t *eng, long timeout_jiffies)
 }
 
 /* ========================================================================= */
-/*  PCI driver: probe / remove                                               */
+/*  PCI driver: probe / remove / module registration                         */
+/*                                                                           */
+/*  module_init → pci_register_driver: tells kernel we handle 1234:dea1      */
+/*  Kernel finds device on bus → calls probe()                               */
+/*  probe() creates engine + runs smoke test                                 */
+/*  rmmod → calls remove() → engine_destroy()                                */
 /* ========================================================================= */
 
 static int dma_engine_probe(struct pci_dev *pdev,
@@ -248,7 +284,18 @@ static int dma_engine_probe(struct pci_dev *pdev,
 
     pci_set_drvdata(pdev, eng);
 
-    /* --- Smoke test: TX to device, RX back, compare --- */
+    /* --- Smoke test: TX to device, RX back, compare ---
+     *
+     * Flow:
+     *   1. Allocate src/dst buffers in kernel memory
+     *   2. dma_map_single — gives device-visible DMA addresses
+     *   3. TX: submit SQE with src DMA addr → doorbell → wait → drain CQE
+     *      (device DMA-reads src from host RAM into its internal buffer)
+     *   4. RX: submit SQE with dst DMA addr → doorbell → wait → drain CQE
+     *      (device DMA-writes its internal buffer to dst in host RAM)
+     *   5. dma_unmap_single — flush caches, release IOMMU mapping
+     *   6. memcmp(src, dst) — verify data survived the roundtrip
+     */
 
     src = kmalloc(64, GFP_KERNEL);
     dst = kmalloc(64, GFP_KERNEL);
