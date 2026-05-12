@@ -1,6 +1,5 @@
 # Interview Prep — 5-Day Plan
 
-Target role: Amazon Annapurna Labs — Neuron Collectives (Trainium).
 
 The five projects build on each other: Days 1–2 produce ring buffers, Day 3 wraps a
 ring buffer in a "device" with DMA descriptors, and Days 4–5 implement collective
